@@ -1,6 +1,6 @@
 ---
-title: "Landslide Susceptibility Analysis Using Active Remote Sensing"
-subtitle: "An Interpretable Machine Learning Apporoach"
+title: "PM modeling"
+subtitle: "SHAP"
 Author: 
 format: 
   html:
