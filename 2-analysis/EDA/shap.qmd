@@ -1,0 +1,433 @@
+---
+title: "Landslide Susceptibility Analysis Using Active Remote Sensing"
+subtitle: "An Interpretable Machine Learning Apporoach"
+Author: 
+format: 
+  html:
+    toc: true
+    code-link: true
+    code-copy: true
+    self-contained: true
+    code-overflow: scroll
+    code-fold: show
+    number-sections: true
+    
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# Setups
+
+
+## Import Packages
+
+```{r}
+library(tidymodels)
+library(treeshap)
+library(fastshap)
+
+# data handling
+library(tidyverse)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(doParallel)
+
+
+# spatial data(vector)
+# library(sf)
+
+
+# spatial data(raster)
+# library(terra)
+# library(tidyterra)
+
+
+# R-Python framework
+# library(reticulate)
+
+# visualization
+library(magick)
+library(gganimate)
+library(viridis)
+library(corrplot)
+
+# spatial data visualization
+# library(tmap)
+# tmap_options(check.and.fix = TRUE)
+
+# library(leafem)
+library(shapviz)
+
+```
+
+
+
+
+## Parallel Computation
+
+```{r}
+
+
+register_cores <- function(cores){
+    if(missing(cores)){
+        
+      cores <- parallel::detectCores(logical = F)
+      
+    }
+  
+  comp_cluster <- parallel::makeCluster(cores - 1)
+  
+  doParallel::registerDoParallel(comp_cluster)
+  
+  return(comp_cluster)
+}
+
+
+stopcl <- function(connections){
+  
+  parallel::stopCluster(connections)
+} 
+
+
+
+
+```
+
+## Set Seed
+
+```{r}
+
+seed <- 1996
+
+```
+
+
+
+# Data
+
+## Importing Data
+
+
+```{r}
+raw_data <- read_csv("./data/mobile_predictors_0116.csv")
+
+
+summary(raw_data)
+
+skimr::skim(raw_data)
+
+```
+
+
+
+```{r}
+
+drop_na(raw_data) %>% select(-mixingLayer) -> drp_na
+
+
+```
+
+
+# Modeling
+
+## Data Splitting & Resampling
+
+```{r}
+prop <- .7
+
+set.seed(seed)
+
+var_splt_init <- initial_split(drp_na, prop = prop)
+
+train_data_init <- training(var_splt_init)
+test_data_init <- testing(var_splt_init)
+
+
+```
+
+
+## Recipie
+
+```{r}
+
+set.seed(seed)
+
+pm_recipe_init <- recipe(formula = mobile_PM2.5 ~ ., data = var_splt_init)
+
+
+pm_recipe_init
+```
+
+
+```{r}
+baked_trained_pm_init <- prep(pm_recipe_init) %>% bake(new_data = train_data_init)
+```
+
+```{r}
+set.seed(seed)
+
+pm_folds_init <- vfold_cv(train_data_init, v = 5, repeats = 2)
+ 
+
+
+```
+
+## Build a init model
+
+
+### XGB
+
+
+#### Workflow for hypram tuning
+
+```{r}
+
+set.seed(seed)
+
+boost_tree() %>%
+  set_args( 
+   #mtry = tune(), # colsample_bytree
+   trees = tune(),         # nrounds
+   min_n = tune(),         # min_child_weight  
+   tree_depth = tune(),    # max_depth
+   learn_rate = tune(),    # eta
+   loss_reduction = tune(),# gamma
+   sample_size = tune(),   # subsample
+   stop_iter = tune()      # early stop
+  ) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression") -> xgb_init
+
+
+
+# # of simulations
+grid_nsim <- 200
+
+grid_random(
+  trees(),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  #finalize(mtry(), baked_trained_pm_init),
+  learn_rate(),
+  stop_iter(),
+  size = grid_nsim) -> xgb_grid_init
+
+xgb_grid_init
+
+
+
+xgb_wf_init <- workflow() %>% 
+  add_recipe(pm_recipe_init) %>% 
+  add_model(xgb_init)
+
+xgb_wf_init
+```
+
+#### tuning the model
+
+
+##### First, Random Tuning
+
+```{r}
+
+set.seed(seed)
+
+
+cons <- register_cores()
+
+xgb_res_init <- tune_grid(
+  xgb_wf_init,
+  resamples = pm_folds_init,
+  grid = xgb_grid_init,
+  control = control_grid(save_pred = T,
+                         verbose = T)
+)
+
+stopcl(cons)
+
+xgb_res_init
+```
+
+
+```{r}
+autoplot(xgb_res_init)
+show_best(xgb_res_init, metric = "rmse")
+```
+
+##### Fine tuning with Bayesian Optimization
+
+```{r}
+set.seed(seed)
+
+cons <- register_cores()
+
+
+xgb_bayes_res_init <- tune_bayes(
+    xgb_wf_init,
+    pm_folds_init, 
+    initial = xgb_res_init, 
+    iter = 6,
+    control = control_bayes(save_pred = TRUE,
+                            allow_par = TRUE,
+                            parallel_over = "everything")
+    )
+
+
+stopcl(cons)
+
+
+```
+
+
+
+
+```{r}
+
+
+xgb_bayes_res_init
+
+
+
+show_best(xgb_bayes_res_init,metric = "rmse")
+
+```
+
+
+#### Selecting the Best Model
+
+`select_best` finds the tuning parameter combination with the best performance values.
+
+```{r}
+
+best_xgb_init <- select_best(xgb_res_init,metric =  "rmse")
+
+```
+
+
+```{r}
+set.seed(seed)
+
+final_wf_xgb_init <- finalize_workflow(
+  xgb_wf_init,
+  best_xgb_init
+)
+
+final_wf_xgb_init
+
+
+```
+#### Last Fit
+
+Emulating the process where, after determining the best model, the final fit on the entire training set is needed and is then evaluated on the test set.
+
+```{r}
+
+metrics <- metric_set(yardstick::mae,   
+                     yardstick::rmse,
+                     yardstick::mpe,
+                     yardstick::mape,
+                     yardstick::rsq
+                     )
+
+```
+
+
+```{r}
+
+set.seed(seed)
+
+final_res_xgb_init <- last_fit(final_wf_xgb_init, 
+                           split = var_splt_init,
+                           metrics = metrics
+                           )
+
+```
+
+
+#### Model Performance
+
+```{r}
+
+collect_metrics(final_res_xgb_init)
+
+```
+
+### SHAP
+
+```{r}
+set.seed(seed)
+
+traindata_init <- bake(prep(pm_recipe_init), new_data = NULL)
+
+xgb_init_unif <- extract_fit_engine(final_res_xgb_init) %>%
+            xgboost.unify(data = traindata_init)
+
+tshap_xgb_init <- treeshap(xgb_init_unif, traindata_init,interactions = T)
+```
+
+#### Feature Importance
+
+```{r}
+plot_feature_importance(tshap_xgb_init)
+```
+
+#### Beeswarm Plot
+
+```{r}
+set.seed(seed)
+
+sv_xgb_init <- shapviz(tshap_xgb_init, X = traindata_init)
+```
+
+
+```{r}
+(sv_importance(sv_xgb_init, kind = "both",
+              show_numbers = TRUE,
+              bar_width = 1,
+              bee_width = 0.2,
+              fill = "blue",
+              max_display = 20
+              )#+ 
+     #labs(x = "SHAP 값(XGB)", col =  "특성 값")
+     ) %>%
+  print -> summary_xgb_init
+```
+
+#### Dependence Plot for all variables
+
+```{r}
+#| fig-show: hold
+
+my_axis_format <- function(x) format(x, big.mark = ",", scientific = FALSE)
+
+
+nm <- names(sv_xgb_init$X)
+
+
+for (i in 1:length(nm)) {
+  sv_dependence(sv_xgb_init,  nm[i], color_var = nm[i]) +
+  geom_smooth(aes(color="non-linear trend", fill="95% conf. interval"),
+    method = 'loess',formula = 'y ~ x')+ 
+    labs(y = "SHAP value", x =  nm[i]) +
+    scale_x_continuous(labels = my_axis_format)+
+    geom_hline(yintercept=0, linetype="dashed", 
+                color = "red", linewidth=1) +
+  scale_fill_manual(NULL, values = 'gray') +
+  scale_color_manual(NULL, values = 'blue') +
+  guides(
+    color=guide_legend(override.aes = list(fill=NA), order=1),
+    fill=guide_legend(override.aes = list(color=NA), order=2))+
+    theme(text = element_text(size=20))-> temp
+    #ggsave(filename = paste0("./images/PDP/XGB/maineff/XGB_",
+    #                         nm[i],"_dep.png"),
+    #     scale = 1,
+    #     dpi = 256)
+    print(temp)
+}
+
+```
+
