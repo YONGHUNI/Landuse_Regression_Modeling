@@ -286,12 +286,13 @@ stopcl(cons)
 
 
 ```{r}
-
-
 xgb_bayes_res_init
 
+autoplot(xgb_bayes_res_init)
+```
 
 
+```{r}
 show_best(xgb_bayes_res_init,metric = "rmse")
 
 ```
@@ -303,7 +304,7 @@ show_best(xgb_bayes_res_init,metric = "rmse")
 
 ```{r}
 
-best_xgb_init <- select_best(xgb_res_init,metric =  "rmse")
+best_xgb_init <- select_best(rbind(xgb_bayes_res_init,xgb_bayes_res_init),metric =  "rmse")
 
 ```
 
